@@ -15,10 +15,10 @@ import Tree from '@shared/Tree.ts';
 import parseParameters from '../_shared/parseParameter.ts';
 import { formatUserMessage } from '../_shared/messageUtils.ts';
 import { corsHeaders } from '../_shared/cors.ts';
+import Anthropic from 'npm:@anthropic-ai/sdk';
 
-// OpenRouter API configuration
-const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
-const OPENROUTER_API_KEY = Deno.env.get('OPENROUTER_API_KEY') ?? '';
+// Anthropic Setup
+const ANTHROPIC_API_KEY = Deno.env.get('ANTHROPIC_API_KEY') ?? '';
 
 // Helper to stream updated assistant message rows
 function streamMessage(
@@ -147,35 +147,7 @@ function isAnthropicBlock(block: unknown): block is AnthropicBlock {
   );
 }
 
-// Convert Anthropic-style message to OpenAI format
-interface OpenAIMessage {
-  role: 'system' | 'user' | 'assistant' | 'tool';
-  content:
-    | string
-    | Array<{ type: string; text?: string; image_url?: { url: string } }>;
-  tool_call_id?: string;
-  tool_calls?: Array<{
-    id: string;
-    type: 'function';
-    function: { name: string; arguments: string };
-  }>;
-}
-
-interface OpenRouterRequest {
-  model: string;
-  messages: OpenAIMessage[];
-  tools?: unknown[]; // OpenRouter/OpenAI tool definition
-  stream?: boolean;
-  max_tokens?: number;
-  reasoning?: {
-    max_tokens?: number;
-    effort?: 'high' | 'medium' | 'low';
-  };
-}
-
-async function generateTitleFromMessages(
-  messagesToSend: OpenAIMessage[],
-): Promise<string> {
+async function generateTitleFromMessages(messagesToSend: any[], anthropic: any): Promise<string> {
   try {
     const titleSystemPrompt = `Generate a short title for a 3D object. Rules:
 - Maximum 25 characters
@@ -184,80 +156,26 @@ async function generateTitleFromMessages(
 - No quotes or special formatting
 - Examples: "Coffee Mug", "Gear Assembly", "Phone Stand"`;
 
-    const response = await fetch(OPENROUTER_API_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-        'HTTP-Referer': 'https://adam-cad.com',
-        'X-Title': 'Adam CAD',
-      },
-      body: JSON.stringify({
-        model: 'anthropic/claude-3.5-haiku',
-        max_tokens: 30,
-        messages: [
-          { role: 'system', content: titleSystemPrompt },
-          ...messagesToSend,
-          {
-            role: 'user',
-            content: 'Title:',
-          },
-        ],
-      }),
+    const response = await anthropic.messages.create({
+      model: 'claude-3-haiku-20240307',
+      max_tokens: 30,
+      system: titleSystemPrompt,
+      messages: [
+        ...messagesToSend,
+        { role: 'user', content: 'Title:' }
+      ]
     });
-
-    if (!response.ok) {
-      throw new Error(`OpenRouter API error: ${response.statusText}`);
-    }
-
-    const data = await response.json();
-    if (data.choices && data.choices[0]?.message?.content) {
-      let title = data.choices[0].message.content.trim();
-
-      // Clean up common LLM artifacts
-      // Remove quotes
-      title = title.replace(/^["']|["']$/g, '');
-      // Remove "Title:" prefix if model echoed it
-      title = title.replace(/^title:\s*/i, '');
-      // Remove any trailing punctuation except necessary ones
-      title = title.replace(/[.!?:;,]+$/, '');
-      // Remove meta-commentary patterns
-      title = title.replace(
-        /\s*(note[s]?|here'?s?|based on|for the|this is).*$/i,
-        '',
-      );
-      // Trim again after cleanup
-      title = title.trim();
-
-      // Enforce max length
-      if (title.length > 27) title = title.substring(0, 24) + '...';
-
-      // If title is empty or too short after cleanup, return null to use fallback
-      if (title.length < 2) return 'Adam Object';
-
-      return title;
-    }
-  } catch (error) {
-    console.error('Error generating object title:', error);
+    
+    let title = response.content[0].text.trim();
+    title = title.replace(/^["']|["']$/g, '').replace(/^title:\s*/i, '').replace(/[.!?:;,]+$/, '');
+    title = title.replace(/\s*(note[s]?|here'?s?|based on|for the|this is).*$/i, '').trim();
+    if (title.length > 27) title = title.substring(0, 24) + '...';
+    if (title.length < 2) return 'Adam Object';
+    return title;
+  } catch(e) { 
+    console.error('Title error', e); 
+    return 'Adam Object'; 
   }
-
-  // Fallbacks
-  let lastUserMessage: OpenAIMessage | undefined;
-  for (let i = messagesToSend.length - 1; i >= 0; i--) {
-    if (messagesToSend[i].role === 'user') {
-      lastUserMessage = messagesToSend[i];
-      break;
-    }
-  }
-  if (lastUserMessage && typeof lastUserMessage.content === 'string') {
-    return (lastUserMessage.content as string)
-      .split(/\s+/)
-      .slice(0, 4)
-      .join(' ')
-      .trim();
-  }
-
-  return 'Adam Object';
 }
 
 // Outer agent system prompt (conversational + tool-using)
@@ -283,49 +201,43 @@ Guidelines:
 // Tool definitions in OpenAI format
 const tools = [
   {
-    type: 'function',
-    function: {
-      name: 'build_parametric_model',
-      description:
-        'Generate or update an OpenSCAD model from user intent and context. Include parameters and ensure the model is manifold and 3D-printable.',
-      parameters: {
-        type: 'object',
-        properties: {
-          text: { type: 'string', description: 'User request for the model' },
-          imageIds: {
-            type: 'array',
-            items: { type: 'string' },
-            description: 'Image IDs to reference',
-          },
-          baseCode: { type: 'string', description: 'Existing code to modify' },
-          error: { type: 'string', description: 'Error to fix' },
+    name: 'build_parametric_model',
+    description:
+      'Generate or update an OpenSCAD model from user intent and context. Include parameters and ensure the model is manifold and 3D-printable.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        text: { type: 'string', description: 'User request for the model' },
+        imageIds: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Image IDs to reference',
         },
+        baseCode: { type: 'string', description: 'Existing code to modify' },
+        error: { type: 'string', description: 'Error to fix' },
       },
     },
   },
   {
-    type: 'function',
-    function: {
-      name: 'apply_parameter_changes',
-      description:
-        'Apply simple parameter updates to the current artifact without re-generating the whole model.',
-      parameters: {
-        type: 'object',
-        properties: {
-          updates: {
-            type: 'array',
-            items: {
-              type: 'object',
-              properties: {
-                name: { type: 'string' },
-                value: { type: 'string' },
-              },
-              required: ['name', 'value'],
+    name: 'apply_parameter_changes',
+    description:
+      'Apply simple parameter updates to the current artifact without re-generating the whole model.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        updates: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              name: { type: 'string' },
+              value: { type: 'string' },
             },
+            required: ['name', 'value'],
           },
         },
-        required: ['updates'],
       },
+      required: ['updates'],
     },
   },
 ];
@@ -539,8 +451,8 @@ Deno.serve(async (req) => {
     }
     const currentMessageBranch = messageTree.getPath(newMessage.id);
 
-    const messagesToSend: OpenAIMessage[] = await Promise.all(
-      currentMessageBranch.map(async (msg: CoreMessage) => {
+    const messagesToSend: any[] = await Promise.all(
+      currentMessageBranch.map(async (msg: any) => {
         if (msg.role === 'user') {
           const formatted = await formatUserMessage(
             msg,
@@ -548,93 +460,33 @@ Deno.serve(async (req) => {
             userData.user.id,
             conversationId,
           );
-          // Convert Anthropic-style to OpenAI-style
-          // formatUserMessage returns content as an array
-          return {
-            role: 'user' as const,
-            content: formatted.content.map((block: unknown) => {
-              if (isAnthropicBlock(block)) {
-                if (block.type === 'text') {
-                  return { type: 'text', text: block.text };
-                } else if (block.type === 'image') {
-                  // Handle both URL and base64 image formats
-                  let imageUrl: string;
-                  if (
-                    'type' in block.source &&
-                    block.source.type === 'base64'
-                  ) {
-                    // Convert Anthropic base64 format to OpenAI data URL format
-                    imageUrl = `data:${block.source.media_type};base64,${block.source.data}`;
-                  } else if ('url' in block.source) {
-                    // Use URL directly
-                    imageUrl = block.source.url;
-                  } else {
-                    // Fallback or error case
-                    return block;
-                  }
-                  return {
-                    type: 'image_url',
-                    image_url: {
-                      url: imageUrl,
-                      detail: 'auto', // Auto-detect appropriate detail level
-                    },
-                  };
-                }
-              }
-              return block;
-            }),
-          };
+          return { role: 'user', content: formatted.content };
         }
-        // Assistant messages: send code or text from history as plain text
         return {
-          role: 'assistant' as const,
+          role: 'assistant',
           content: msg.content.artifact
             ? msg.content.artifact.code || ''
             : msg.content.text || '',
         };
       }),
     );
-
-    // Prepare request body
-    const requestBody: OpenRouterRequest = {
-      model,
-      messages: [
-        { role: 'system', content: PARAMETRIC_AGENT_PROMPT },
-        ...messagesToSend,
-      ],
-      tools,
-      stream: true,
-      max_tokens: 16000,
+    
+    const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
+    
+    const getAnthropicModel = (m: string | undefined) => {
+      if (!m || m.includes('gpt') || m.includes('gemini')) return 'claude-sonnet-4-6';
+      return m.replace('anthropic/', '').replace(/\./g, '-');
     };
 
-    // Add reasoning/thinking parameter if requested and supported
-    // OpenRouter uses a unified 'reasoning' parameter
-    if (thinking) {
-      requestBody.reasoning = {
-        max_tokens: 12000,
-      };
-      // Ensure total max_tokens is high enough to accommodate reasoning + output
-      requestBody.max_tokens = 20000;
-    }
-
-    const response = await fetch(OPENROUTER_API_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-        'HTTP-Referer': 'https://adam-cad.com',
-        'X-Title': 'Adam CAD',
-      },
-      body: JSON.stringify(requestBody),
+    // Prepare request body
+    const stream = await anthropic.messages.create({
+      model: getAnthropicModel(model),
+      max_tokens: 8192,
+      system: PARAMETRIC_AGENT_PROMPT,
+      messages: messagesToSend,
+      tools: tools as any,
+      stream: true,
     });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error(`OpenRouter API Error: ${response.status} - ${errorText}`);
-      throw new Error(
-        `OpenRouter API error: ${response.statusText} (${response.status})`,
-      );
-    }
 
     const responseStream = new ReadableStream({
       async start(controller) {
@@ -658,114 +510,41 @@ Deno.serve(async (req) => {
         };
 
         try {
-          const reader = response.body?.getReader();
-          const decoder = new TextDecoder();
-          let buffer = '';
-
-          if (!reader) {
-            throw new Error('No response body');
-          }
-
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split('\n');
-            buffer = lines.pop() || '';
-
-            for (const line of lines) {
-              if (line.startsWith('data: ')) {
-                const data = line.slice(6);
-                if (data === '[DONE]') continue;
-
-                try {
-                  const chunk = JSON.parse(data);
-
-                  // Detect OpenRouter error responses in the SSE stream
-                  if (chunk.error) {
-                    console.error('OpenRouter stream error:', chunk.error);
-                    throw new Error(
-                      chunk.error.message ||
-                        `OpenRouter error: ${JSON.stringify(chunk.error)}`,
-                    );
-                  }
-
-                  const delta = chunk.choices?.[0]?.delta;
-
-                  if (!delta) continue;
-
-                  // Handle text content
-                  if (delta.content) {
-                    content = {
-                      ...content,
-                      text: (content.text || '') + delta.content,
-                    };
-                    streamMessage(controller, { ...newMessageData, content });
-                  }
-
-                  // Handle reasoning content (if returned by OpenRouter)
-                  if (delta.reasoning) {
-                    // We can optionally display this, but for now we just consume it so it doesn't break anything
-                    // Or append to text if we want to show it?
-                    // Usually we don't show internal reasoning in the final message unless explicitly requested.
-                  }
-
-                  // Handle tool calls
-                  if (delta.tool_calls) {
-                    for (const toolCall of delta.tool_calls) {
-                      const _index = toolCall.index || 0;
-
-                      // Start of new tool call
-                      if (toolCall.id) {
-                        currentToolCall = {
-                          id: toolCall.id,
-                          name: toolCall.function?.name || '',
-                          arguments: '',
-                        };
-                        content = {
-                          ...content,
-                          toolCalls: [
-                            ...(content.toolCalls || []),
-                            {
-                              name: currentToolCall.name,
-                              id: currentToolCall.id,
-                              status: 'pending',
-                            },
-                          ],
-                        };
-                        streamMessage(controller, {
-                          ...newMessageData,
-                          content,
-                        });
-                      }
-
-                      // Accumulate arguments
-                      if (toolCall.function?.arguments && currentToolCall) {
-                        currentToolCall.arguments +=
-                          toolCall.function.arguments;
-                      }
-                    }
-                  }
-
-                  // Check if tool call is complete (when we get finish_reason)
-                  if (
-                    chunk.choices?.[0]?.finish_reason === 'tool_calls' &&
-                    currentToolCall
-                  ) {
-                    await handleToolCall(currentToolCall);
-                    currentToolCall = null;
-                  }
-                } catch (e) {
-                  console.error('Error parsing SSE chunk:', e);
-                }
+          for await (const chunk of stream) {
+            if (chunk.type === 'content_block_start' && chunk.content_block.type === 'tool_use') {
+              currentToolCall = {
+                id: chunk.content_block.id,
+                name: chunk.content_block.name,
+                arguments: '',
+              };
+              content = {
+                ...content,
+                toolCalls: [
+                  ...(content.toolCalls || []),
+                  {
+                    name: currentToolCall.name,
+                    id: currentToolCall.id,
+                    status: 'pending',
+                  },
+                ],
+              };
+              streamMessage(controller, { ...newMessageData, content });
+            } else if (chunk.type === 'content_block_delta' && chunk.delta.type === 'text_delta') {
+              content = {
+                ...content,
+                text: (content.text || '') + chunk.delta.text,
+              };
+              streamMessage(controller, { ...newMessageData, content });
+            } else if (chunk.type === 'content_block_delta' && chunk.delta.type === 'input_json_delta') {
+              if (currentToolCall) {
+                currentToolCall.arguments += chunk.delta.partial_json;
+              }
+            } else if (chunk.type === 'content_block_stop') {
+              if (currentToolCall) {
+                await handleToolCall(currentToolCall);
+                currentToolCall = null;
               }
             }
-          }
-
-          // Handle any remaining tool call
-          if (currentToolCall) {
-            await handleToolCall(currentToolCall);
           }
         } catch (error) {
           console.error(error);
@@ -788,7 +567,7 @@ Deno.serve(async (req) => {
               );
 
               // Generate a title from the messages
-              const title = await generateTitleFromMessages(messagesToSend);
+              const title = await generateTitleFromMessages(messagesToSend, anthropic);
 
               // Remove the code from the text (keep any non-code explanation)
               let cleanedText = content.text;
@@ -881,14 +660,14 @@ Deno.serve(async (req) => {
             }
 
             // Build code generation messages
-            const baseContext: OpenAIMessage[] = toolInput.baseCode
+            const baseContext: any[] = toolInput.baseCode
               ? [{ role: 'assistant' as const, content: toolInput.baseCode }]
               : [];
 
             // If baseContext adds an assistant message, re-state user request so conversation ends with user
             const userText = newMessage?.content.text || '';
             const needsUserMessage = baseContext.length > 0 || toolInput.error;
-            const finalUserMessage: OpenAIMessage[] = needsUserMessage
+            const finalUserMessage: any[] = needsUserMessage
               ? [
                   {
                     role: 'user' as const,
@@ -899,56 +678,29 @@ Deno.serve(async (req) => {
                 ]
               : [];
 
-            const codeMessages: OpenAIMessage[] = [
+            const codeMessages: any[] = [
               ...messagesToSend,
               ...baseContext,
               ...finalUserMessage,
             ];
 
             // Code generation request logic
-            const codeRequestBody: OpenRouterRequest = {
-              model,
-              messages: [
-                { role: 'system', content: STRICT_CODE_PROMPT },
-                ...codeMessages,
-              ],
-              max_tokens: 16000,
-            };
-
-            // Also apply thinking to code generation if enabled
-            if (thinking) {
-              codeRequestBody.reasoning = {
-                max_tokens: 12000,
-              };
-              codeRequestBody.max_tokens = 20000;
-            }
-
             const [codeResult, titleResult] = await Promise.allSettled([
-              fetch(OPENROUTER_API_URL, {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-                  'HTTP-Referer': 'https://adam-cad.com',
-                  'X-Title': 'Adam CAD',
-                },
-                body: JSON.stringify(codeRequestBody),
-              }).then(async (r) => {
-                if (!r.ok) {
-                  const t = await r.text();
-                  throw new Error(`Code gen error: ${r.status} - ${t}`);
-                }
-                return r.json();
+              anthropic.messages.create({
+                model: getAnthropicModel(model),
+                system: STRICT_CODE_PROMPT,
+                max_tokens: 8192,
+                messages: codeMessages,
               }),
-              generateTitleFromMessages(messagesToSend),
+              generateTitleFromMessages(messagesToSend, anthropic),
             ]);
 
             let code = '';
             if (
               codeResult.status === 'fulfilled' &&
-              codeResult.value.choices?.[0]?.message?.content
+              codeResult.value.content[0].type === 'text'
             ) {
-              code = codeResult.value.choices[0].message.content.trim();
+              code = codeResult.value.content[0].text.trim();
             } else if (codeResult.status === 'rejected') {
               console.error('Code generation failed:', codeResult.reason);
             }
