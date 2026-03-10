@@ -1,20 +1,22 @@
 ---
-description: 
-globs: *.sql,supabase.ts,supabase/*
-alwaysApply: false
+description: Database Workflow
 ---
+
 # Database Workflow Rules
+
 version: 1.0.0
 
 ## Database Schema Changes
 
 ### NEVER Create Manual Migrations
+
 - Do NOT manually create migration files in `supabase/migrations/`
 - Always use the declarative schema approach
 - Update schema files in `supabase/schemas/` folder instead
 - Only modify generated migrations files if absolutely necessary
 
 ### Schema File Management
+
 - Modify existing table schemas in `supabase/schemas/` files
 - Add new tables by creating new schema files
 - Follow the existing schema file patterns and naming conventions
@@ -22,18 +24,22 @@ version: 1.0.0
 ## Migration Generation Process
 
 ### Step 1: Stop Supabase
+
 ```bash
 supabase stop
 ```
 
 ### Step 2: Generate Migration
+
 ```bash
 supabase db diff -f <migration_name>
 ```
+
 - Replace `<migration_name>` with descriptive name (e.g., `add_user_preferences`, `create_new_table`)
 - Migration will be generated in `supabase/migrations/` with timestamp
 
 ### Step 3: Apply Migration
+
 ```bash
 supabase start && supabase migration up
 ```
@@ -41,6 +47,7 @@ supabase start && supabase migration up
 ## Local Development Only
 
 ### CRITICAL: Never Push to Remote
+
 - NEVER use `supabase db push`
 - NEVER use `supabase db pull`
 - ALL migrations should be tested locally only
@@ -49,8 +56,10 @@ supabase start && supabase migration up
 ## Type Generation
 
 ### Auto-Generate Types
+
 - NEVER manually edit `shared/database.ts`
 - Always regenerate after schema changes:
+
 ```bash
 supabase gen types typescript --local > shared/database.ts
 ```
